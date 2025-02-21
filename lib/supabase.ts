@@ -3,13 +3,19 @@ import type { Company, Chat, Message } from "@/types"
 
 let supabaseClient: ReturnType<typeof createClient> | null = null
 
-export function initSupabase(url: string, key: string) {
-  supabaseClient = createClient(url, key)
+export const initSupabase = (url: string, key: string) => {
+  if (!supabaseClient) {
+    console.log("Inicializando o cliente Supabase com:", url, key);
+    supabaseClient = createClient(url, key)
+  } else {
+    console.log("Cliente Supabase já inicializado.");
+  }
   return supabaseClient
 }
 
 export function getSupabase() {
   if (!supabaseClient) {
+    console.error("Tentativa de acessar o cliente Supabase antes da inicialização.");
     throw new Error("Supabase client not initialized")
   }
   return supabaseClient

@@ -18,21 +18,28 @@ export function SettingsView() {
   const [isTestingSupabase, setIsTestingSupabase] = useState(false)
   const [companies, setCompanies] = useState<Company[]>([])
   const { toast } = useToast()
+  const [isSupabaseConnected, setIsSupabaseConnected] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const testSupabaseConnection = async () => {
     setIsTestingSupabase(true)
+    setErrorMessage(null)
+    console.log("Tentando conectar ao Supabase com:", config.supabaseUrl, config.supabaseKey)
     try {
       const supabase = initSupabase(config.supabaseUrl, config.supabaseKey)
       const { data, error } = await supabase.from("profiles").select("count")
       if (error) throw error
 
       setIsConfigValid({ supabase: true })
+      setIsSupabaseConnected(true)
       toast({
         title: "Conexão Supabase estabelecida",
         description: "As credenciais do Supabase foram validadas com sucesso.",
       })
     } catch (error) {
       setIsConfigValid({ supabase: false })
+      setIsSupabaseConnected(false)
+      setErrorMessage("Erro na conexão com o Supabase. Verifique suas credenciais.")
       toast({
         title: "Erro na conexão Supabase",
         description: "Verifique suas credenciais e tente novamente.",
@@ -65,6 +72,11 @@ export function SettingsView() {
 
   return (
     <div className="flex-1 p-6 overflow-auto">
+      {errorMessage && (
+        <div className="bg-red-500 text-white p-4 rounded mb-4">
+          {errorMessage}
+        </div>
+      )}
       <h1 className="text-2xl font-bold mb-6">Configurações</h1>
 
       <Tabs defaultValue="apis">
@@ -89,13 +101,17 @@ export function SettingsView() {
                       placeholder="https://xxx.supabase.co"
                       value={config.supabaseUrl}
                       onChange={(e) => setConfig({ supabaseUrl: e.target.value })}
-                      className={isConfigValid.supabase ? "border-green-500 focus-visible:ring-green-500" : ""}
+                      className={`${isConfigValid.supabase ? "border-green-500 focus-visible:ring-green-500" : ""} ${isSupabaseConnected ? "bg-gray-200 cursor-not-allowed" : ""}`}
+                      disabled={isSupabaseConnected}
                     />
-                    <Button onClick={testSupabaseConnection} disabled={isTestingSupabase}>
+                    <Button onClick={testSupabaseConnection} disabled={isTestingSupabase || isSupabaseConnected}>
                       {isTestingSupabase ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : isConfigValid.supabase ? (
-                        <Check className="h-4 w-4 text-green-500" />
+                      ) : isSupabaseConnected ? (
+                        <>
+                          <Check className="h-4 w-4 text-green-500" />
+                          <span className="ml-2">Conectado</span>
+                        </>
                       ) : (
                         "Testar"
                       )}
