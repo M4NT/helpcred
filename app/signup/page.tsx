@@ -68,7 +68,7 @@ const SignUpPage = () => {
             Criar conta
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
-            Crie sua conta na Acme Inc
+            Crie sua conta na Help Cred
           </p>
         </div>
 

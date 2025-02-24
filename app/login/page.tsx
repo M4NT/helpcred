@@ -64,7 +64,7 @@ const LoginPage = () => {
             Login
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
-            Acesse sua conta na Acme Inc
+            Acesse sua conta na Help Cred
           </p>
         </div>
 
