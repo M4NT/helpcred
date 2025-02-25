@@ -247,81 +247,63 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       
       console.log(`Verificando sala de chat entre usuários: ${currentUserId} e ${otherUserId}`);
       
-      // Primeiro, tentar verificar se já existe uma conversa direta entre estes usuários
-      // consultando a tabela de participantes para encontrar conversas em comum
+      // Usar a função RPC segura para buscar salas compartilhadas
       try {
-        const { data: existingConversations, error: conversationsError } = await supabase
-          .from("conversation_participants")
-          .select("conversation_id")
-          .eq("profile_id", currentUserId);
-          
-        if (conversationsError) {
-          // Verificar se é o erro de recursão infinita
-          if (conversationsError.code === '42P17') {
-            console.warn("Detectada recursão infinita na política RLS. Tentando método alternativo...");
-            // Continuar com o fluxo alternativo abaixo
-          } else {
-            console.error("Erro ao verificar conversas existentes:", conversationsError);
-            return null;
-          }
-        } else if (existingConversations && existingConversations.length > 0) {
-          // Obter todos os IDs de conversas do usuário atual
-          const conversationIds = existingConversations.map(c => c.conversation_id);
-          
-          // Primeiro, obter as conversas que são do tipo "direct"
-          const { data: directConversations, error: conversationsError } = await supabase
-            .from("conversations")
-            .select("id")
-            .eq("type", "direct")
-            .in("id", conversationIds);
+        const { data: rpcData, error: rpcError } = await supabase.rpc(
+          'get_user_conversations',
+          { user_id: currentUserId }
+        );
+        
+        if (rpcError) {
+          console.error("Erro ao chamar RPC get_user_conversations:", rpcError);
+        } else if (rpcData && Array.isArray(rpcData)) {
+          // Filtrar apenas conversas diretas e que tenham o outro usuário como participante
+          const sharedConversation = rpcData.find(conversation => {
+            // Verificar se é uma conversa direta
+            if (conversation.type !== 'direct') return false;
             
-          if (conversationsError) {
-            console.error("Erro ao verificar conversas diretas:", conversationsError);
-          } else if (directConversations && directConversations.length > 0) {
-            // Agora, verificar quais dessas conversas diretas têm o outro usuário como participante
-            const directIds = directConversations.map(c => c.id);
-            
-            const { data: sharedConversations, error: sharedError } = await supabase
-              .from("conversation_participants")
-              .select("conversation_id")
-              .eq("profile_id", otherUserId)
-              .in("conversation_id", directIds);
-              
-            if (sharedError) {
-              console.error("Erro ao verificar conversas compartilhadas:", sharedError);
-            } else if (sharedConversations && sharedConversations.length > 0) {
-              // Encontramos uma conversa direta compartilhada
-              const existingRoomId = sharedConversations[0].conversation_id;
-              console.log(`Conversa direta existente encontrada: ${existingRoomId}`);
-              return existingRoomId;
-            }
+            // Verificar se o outro usuário é participante nesta conversa
+            const participants = conversation.profiles || [];
+            return participants.some((profile: any) => profile && profile.id === otherUserId);
+          });
+          
+          if (sharedConversation) {
+            console.log(`Conversa existente encontrada via RPC: ${sharedConversation.id}`);
+            return sharedConversation.id;
           }
         }
-      } catch (recursionError) {
-        console.warn("Erro capturado ao verificar conversas:", recursionError);
-        // Continuar com o fluxo alternativo abaixo
+      } catch (rpcError) {
+        console.warn("RPC falhou, tentando método alternativo:", rpcError);
+        // Continuar com fluxo alternativo se a RPC falhar
       }
       
-      // SOLUÇÃO ALTERNATIVA: Se a verificação normal falhou devido à recursão, 
-      // tente uma abordagem diferente usando uma RPC personalizada ou função postgres
-      try {
-        // Neste exemplo, vamos apenas criar uma nova conversa, em produção 
-        // você deve implementar uma função RPC personalizada para verificar conversas existentes
-        console.log("Usando método alternativo para verificar conversas...");
-        
-        // Aqui você poderia chamar um endpoint personalizado ou RPC function que contorna a RLS
-        // Exemplo: const { data } = await supabase.rpc('get_shared_conversation', { user_id_a: currentUserId, user_id_b: otherUserId });
-      } catch (alternativeError) {
-        console.error("Erro no método alternativo:", alternativeError);
+      // Se chegou aqui, vamos tentar uma abordagem alternativa mais direta e segura
+      console.log("Usando método alternativo para verificar conversas...");
+      
+      // Usar nossa função auxiliar para gerar o ID da sala a partir dos IDs dos usuários
+      const expectedRoomId = getRoomId(currentUserId, otherUserId);
+      
+      // Verificar se esta sala específica já existe
+      const { data: existingRoom, error: roomCheckError } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('id', expectedRoomId)
+        .maybeSingle();
+      
+      if (roomCheckError) {
+        console.error("Erro ao verificar sala existente:", roomCheckError);
+      } else if (existingRoom) {
+        console.log(`Sala de chat existente encontrada por ID: ${existingRoom.id}`);
+        return existingRoom.id;
       }
       
       // Se chegou aqui, não encontrou conversa existente, então vamos criar uma nova
       console.log("Criando nova sala de chat");
       
-      // Gerar um UUID v4 para a nova conversa
-      const newRoomId = crypto.randomUUID();
+      // Usar o ID determinístico gerado para os dois usuários
+      const newRoomId = expectedRoomId;
       
-      // Criar a conversa com um UUID válido
+      // Criar a conversa com o ID determinístico
       const { data: conversationData, error: createError } = await supabase
         .from("conversations")
         .insert({
@@ -334,28 +316,27 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       
       if (createError) {
         console.error("Erro ao criar sala:", createError);
-        alert("Não foi possível criar a sala de chat. Verifique as permissões.");
+        
+        // Verificar se o erro é de chave duplicada, o que significa que a sala já existe
+        if (createError.code === '23505') { // código de erro para chave duplicada
+          console.log("Sala já existe (erro de duplicação), usando ID existente");
+          return newRoomId;
+        }
+        
+        alert("Não foi possível criar a sala de chat. Erro: " + createError.message);
         return null;
       }
-      
-      if (!conversationData || conversationData.length === 0) {
-        console.error("Falha ao criar sala - sem dados retornados");
-        return null;
-      }
-      
-      const conversationId = conversationData[0].id;
-      console.log(`Nova sala criada com ID: ${conversationId}`);
       
       // Adicionar ambos os participantes simultaneamente
       const participantsToAdd = [
         {
-          conversation_id: conversationId,
+          conversation_id: newRoomId,
           profile_id: currentUserId,
           role: "admin",
           created_at: new Date().toISOString()
         },
         {
-          conversation_id: conversationId,
+          conversation_id: newRoomId,
           profile_id: otherUserId,
           role: "member",
           created_at: new Date().toISOString()
@@ -374,7 +355,7 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
           await supabase
             .from("conversations")
             .delete()
-            .eq("id", conversationId);
+            .eq("id", newRoomId);
           console.log("Sala excluída após falha ao adicionar participantes.");
         } catch (deleteError) {
           console.error("Erro ao excluir sala após falha:", deleteError);
@@ -383,7 +364,8 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
         return null;
       }
       
-      return conversationId;
+      console.log(`Nova sala criada com ID: ${newRoomId} e participantes adicionados com sucesso`);
+      return newRoomId;
     } catch (error) {
       console.error("Erro ao acessar sala de chat:", error);
       return null;

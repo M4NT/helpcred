@@ -44,8 +44,12 @@ TO authenticated
 USING (
     profile_id = auth.uid() OR
     EXISTS (
-        SELECT 1 FROM public.conversation_participants
-        WHERE conversation_id = conversation_id AND profile_id = auth.uid()
+        SELECT 1 FROM public.conversations c
+        WHERE c.id = conversation_id AND
+        EXISTS (
+            SELECT 1 FROM public.conversation_participants cp
+            WHERE cp.conversation_id = c.id AND cp.profile_id = auth.uid()
+        )
     )
 );
 
@@ -57,10 +61,10 @@ WITH CHECK (
     profile_id = auth.uid() OR
     -- Usuários podem adicionar outros a conversas onde são admin
     EXISTS (
-        SELECT 1 FROM public.conversation_participants
-        WHERE conversation_id = conversation_id 
-        AND profile_id = auth.uid() 
-        AND role = 'admin'
+        SELECT 1 FROM public.conversation_participants cp
+        WHERE cp.conversation_id = conversation_id 
+        AND cp.profile_id = auth.uid() 
+        AND cp.role = 'admin'
     )
 );
 

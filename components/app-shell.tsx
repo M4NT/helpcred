@@ -7,8 +7,7 @@ import Image from "next/image"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
-import { ChatView } from "@/components/chat-view"
-import { ConversationList } from "@/components/conversation-list"
+import { Conversation } from "@/components/conversation"
 import { NotificationsView } from "@/components/notifications-view"
 import { ProfileView } from "@/components/profile-view"
 import { SettingsView } from "@/components/settings-view"
@@ -22,7 +21,7 @@ export function AppShell() {
   const renderMainContent = () => {
     switch (currentView) {
       case "chat":
-        return <ChatView />
+        return <Conversation />
       case "profile":
         return <ProfileView />
       case "notifications":
@@ -32,7 +31,7 @@ export function AppShell() {
       case "settings":
         return <SettingsView />
       default:
-        return <ChatView />
+        return <Conversation />
     }
   }
 
@@ -87,9 +86,6 @@ export function AppShell() {
           </Avatar>
         </div>
       </div>
-
-      {/* Conversations List */}
-      <ConversationList />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col">{renderMainContent()}</div>
