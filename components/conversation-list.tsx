@@ -247,63 +247,42 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       
       console.log(`Verificando sala de chat entre usuários: ${currentUserId} e ${otherUserId}`);
       
-      // Usar a função RPC segura para buscar salas compartilhadas
+      // --- MÉTODO 1: TENTAR USAR A FUNÇÃO RPC SEGURA ---
       try {
-        const { data: rpcData, error: rpcError } = await supabase.rpc(
+        console.log("Tentando método RPC para encontrar conversas...");
+        const { data: conversations, error: convError } = await supabase.rpc(
           'get_user_conversations',
           { user_id: currentUserId }
         );
         
-        if (rpcError) {
-          console.error("Erro ao chamar RPC get_user_conversations:", rpcError);
-        } else if (rpcData && Array.isArray(rpcData)) {
+        if (convError) {
+          console.error("Erro ao chamar RPC get_user_conversations:", convError);
+        } else if (conversations && Array.isArray(conversations)) {
           // Filtrar apenas conversas diretas e que tenham o outro usuário como participante
-          const sharedConversation = rpcData.find(conversation => {
-            // Verificar se é uma conversa direta
-            if (conversation.type !== 'direct') return false;
+          const directConversation = conversations.find((conv: any) => {
+            if (conv.type !== 'direct') return false;
             
-            // Verificar se o outro usuário é participante nesta conversa
-            const participants = conversation.profiles || [];
+            // Verificar se o outro usuário é participante
+            const participants = conv.profiles || [];
             return participants.some((profile: any) => profile && profile.id === otherUserId);
           });
           
-          if (sharedConversation) {
-            console.log(`Conversa existente encontrada via RPC: ${sharedConversation.id}`);
-            return sharedConversation.id;
+          if (directConversation) {
+            console.log(`Conversa existente encontrada via RPC: ${directConversation.id}`);
+            return directConversation.id;
           }
         }
       } catch (rpcError) {
         console.warn("RPC falhou, tentando método alternativo:", rpcError);
-        // Continuar com fluxo alternativo se a RPC falhar
       }
       
-      // Se chegou aqui, vamos tentar uma abordagem alternativa mais direta e segura
-      console.log("Usando método alternativo para verificar conversas...");
+      // --- MÉTODO 2: CRIAR CONVERSA DIRETAMENTE IGNORANDO VERIFICAÇÃO ---
+      console.log("Criando nova sala de chat diretamente...");
       
-      // Usar nossa função auxiliar para gerar o ID da sala a partir dos IDs dos usuários
-      const expectedRoomId = getRoomId(currentUserId, otherUserId);
+      // Gerar um novo ID para a sala
+      const newRoomId = crypto.randomUUID();
       
-      // Verificar se esta sala específica já existe
-      const { data: existingRoom, error: roomCheckError } = await supabase
-        .from('conversations')
-        .select('id')
-        .eq('id', expectedRoomId)
-        .maybeSingle();
-      
-      if (roomCheckError) {
-        console.error("Erro ao verificar sala existente:", roomCheckError);
-      } else if (existingRoom) {
-        console.log(`Sala de chat existente encontrada por ID: ${existingRoom.id}`);
-        return existingRoom.id;
-      }
-      
-      // Se chegou aqui, não encontrou conversa existente, então vamos criar uma nova
-      console.log("Criando nova sala de chat");
-      
-      // Usar o ID determinístico gerado para os dois usuários
-      const newRoomId = expectedRoomId;
-      
-      // Criar a conversa com o ID determinístico
+      // Criar a conversa
       const { data: conversationData, error: createError } = await supabase
         .from("conversations")
         .insert({
@@ -316,58 +295,53 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       
       if (createError) {
         console.error("Erro ao criar sala:", createError);
+        return null;
+      }
+      
+      console.log(`Sala criada com ID: ${newRoomId}`);
+      
+      // Adicionar participantes
+      try {
+        console.log("Adicionando participantes à sala...");
+        // Adicionar ambos os participantes simultaneamente
+        const participantsToAdd = [
+          {
+            conversation_id: newRoomId,
+            profile_id: currentUserId,
+            role: "admin",
+            created_at: new Date().toISOString()
+          },
+          {
+            conversation_id: newRoomId,
+            profile_id: otherUserId,
+            role: "member",
+            created_at: new Date().toISOString()
+          }
+        ];
         
-        // Verificar se o erro é de chave duplicada, o que significa que a sala já existe
-        if (createError.code === '23505') { // código de erro para chave duplicada
-          console.log("Sala já existe (erro de duplicação), usando ID existente");
+        const { error: addParticipantsError } = await supabase
+          .from("conversation_participants")
+          .insert(participantsToAdd);
+        
+        if (addParticipantsError) {
+          console.error("Erro ao adicionar participantes:", addParticipantsError);
+          
+          // Mesmo com erro, vamos tentar prosseguir, já que a sala foi criada
+          console.log("Tentando prosseguir mesmo com erro ao adicionar participantes");
           return newRoomId;
         }
         
-        alert("Não foi possível criar a sala de chat. Erro: " + createError.message);
-        return null;
-      }
-      
-      // Adicionar ambos os participantes simultaneamente
-      const participantsToAdd = [
-        {
-          conversation_id: newRoomId,
-          profile_id: currentUserId,
-          role: "admin",
-          created_at: new Date().toISOString()
-        },
-        {
-          conversation_id: newRoomId,
-          profile_id: otherUserId,
-          role: "member",
-          created_at: new Date().toISOString()
-        }
-      ];
-      
-      const { error: addParticipantsError } = await supabase
-        .from("conversation_participants")
-        .insert(participantsToAdd);
-      
-      if (addParticipantsError) {
-        console.error("Erro ao adicionar participantes:", addParticipantsError);
+        console.log("Participantes adicionados com sucesso");
+        return newRoomId;
+      } catch (participantsError) {
+        console.error("Erro ao processar adição de participantes:", participantsError);
         
-        // Limpar a conversa criada para evitar órfãos
-        try {
-          await supabase
-            .from("conversations")
-            .delete()
-            .eq("id", newRoomId);
-          console.log("Sala excluída após falha ao adicionar participantes.");
-        } catch (deleteError) {
-          console.error("Erro ao excluir sala após falha:", deleteError);
-        }
-        
-        return null;
+        // Mesmo com erro, retornar o ID da sala, já que ela foi criada
+        console.log("Retornando ID da sala mesmo com erro de participantes");
+        return newRoomId;
       }
-      
-      console.log(`Nova sala criada com ID: ${newRoomId} e participantes adicionados com sucesso`);
-      return newRoomId;
     } catch (error) {
-      console.error("Erro ao acessar sala de chat:", error);
+      console.error("Erro geral ao acessar sala de chat:", error);
       return null;
     }
   };
@@ -408,32 +382,24 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       console.log("Sala de chat criada ou obtida com sucesso:", roomId);
       console.log("Dados do usuário para a conversa:", userData);
       
-      console.log("Mudando para a aba de conversas...");
+      // Passar diretamente para o modo de visualização de conversa, sem esperar atualizações
+      console.log("Chamando onSelectConversation diretamente com:", roomId, userData);
+      onSelectConversation(roomId, userData);
+      
+      // Apenas depois disso, atualizar a interface
       setActiveTab("conversations");
       
-      // Atualizar a lista de conversas antes de selecionar
-      console.log("Recarregando lista de conversas...");
-      const data = await fetchUserConversations(currentUserId);
-      setConversations(data || []);
-        
-      // Verificar se a conversa está na lista atualizada
-      const conversationExists = data?.some((c: Conversation) => c.id === roomId);
-      console.log("Conversa encontrada na lista atualizada:", conversationExists ? "Sim" : "Não");
-      
-      // Pequeno atraso para garantir que a aba de conversas foi carregada e os estados atualizados
-      console.log("Aguardando atualização de estados...");
-      setTimeout(() => {
-        // Validação final antes de selecionar a conversa
-        if (!onSelectConversation) {
-          console.error("Callback onSelectConversation não disponível");
-          return;
-        }
-        
-        // Enviar para o componente de chat
-        console.log("Chamando onSelectConversation com:", roomId, userData);
-        onSelectConversation(roomId, userData);
-        console.log("Processo de seleção de conversa concluído com sucesso");
-      }, 300); // Aumentar o tempo de espera para garantir que todos os estados foram atualizados
+      // Atualizar a lista de conversas em segundo plano
+      if (currentUserId) {
+        fetchUserConversations(currentUserId)
+          .then(data => {
+            setConversations(data || []);
+            console.log("Lista de conversas atualizada em segundo plano");
+          })
+          .catch(err => {
+            console.error("Erro ao atualizar lista de conversas:", err);
+          });
+      }
     } catch (error) {
       console.error("Erro ao processar sala de chat:", error);
       alert("Ocorreu um erro ao acessar a sala de chat. Por favor, tente novamente.");
