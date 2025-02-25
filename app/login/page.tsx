@@ -48,7 +48,7 @@ const LoginPage = () => {
         }
       }
 
-      router.push('/dashboard') // Redireciona para o dashboard ou outra página
+      router.push('/') // Redireciona para o dashboard ou outra página
     } catch (error) {
       setError(error.message)
     } finally {
