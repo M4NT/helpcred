@@ -276,7 +276,7 @@ export async function fetchMessages(userId: string, conversationId: string): Pro
     const mappedMessages = data.map(message => ({
       id: message.id,
       chatId: message.conversation_id,
-      content: message.content,
+      content: message.message_text || message.content, // Prioriza message_text, com fallback para content
       type: message.type,
       sender: message.sender_id === userId ? "agent" : "customer",
       timestamp: message.created_at,
@@ -308,6 +308,8 @@ export async function sendMessage({
   fileSize?: number | null;
 }) {
   try {
+    console.log(`Enviando mensagem para conversa ${chatId}:`, { content, type, sender });
+    
     // Obter ID do usuário atual
     const { data: session } = await supabase.auth.getSession();
     if (!session || !session.session) {
@@ -316,11 +318,12 @@ export async function sendMessage({
     
     const senderId = session.session.user.id;
     
-    // Criar mensagem
+    // Criar mensagem - preenchendo tanto content quanto message_text
     const { data, error } = await supabase.from("messages").insert({
       conversation_id: chatId,
       sender_id: senderId,
-      content,
+      content: content, // Coluna content
+      message_text: content, // Coluna message_text
       type,
       file_name: fileName,
       file_size: fileSize,
@@ -344,16 +347,78 @@ export async function sendMessage({
   }
 }
 
-export async function createConversation(type: "direct" | "group", title?: string, participants?: string[], avatarUrl?: string) {
+export async function findDirectConversation(userId1: string, userId2: string): Promise<string | null> {
   try {
-    const user = await getCurrentUser()
+    console.log(`Buscando conversa direta entre ${userId1} e ${userId2}`);
     
-    if (!user) {
-      throw new Error("Usuário não autenticado")
+    // Verificar autenticação
+    const { data: session } = await supabase.auth.getSession();
+    if (!session || !session.session) {
+      console.error("Usuário não autenticado");
+      return null;
     }
     
-    // Criar a conversa
-    const now = new Date().toISOString()
+    // Verificação #1: Buscar diretamente pela tabela de participantes
+    const { data: participantsData, error: participantsError } = await supabase
+      .from('conversation_participants')
+      .select('conversation_id')
+      .eq('profile_id', userId1);
+    
+    if (participantsError) {
+      console.error("Erro ao verificar participação:", participantsError);
+    } else if (participantsData && participantsData.length > 0) {
+      // Obtemos todas as conversas do usuário 1
+      const conversationIds = participantsData.map(p => p.conversation_id);
+      
+      // Agora verificamos quais dessas também têm o usuário 2 como participante
+      const { data: matchingConversations, error: matchingError } = await supabase
+        .from('conversations')
+        .select(`
+          id, 
+          type,
+          conversation_participants!inner(profile_id)
+        `)
+        .in('id', conversationIds)
+        .eq('conversation_participants.profile_id', userId2)
+        .eq('type', 'direct');
+      
+      if (!matchingError && matchingConversations && matchingConversations.length > 0) {
+        // Se encontrarmos alguma conversa, retornar a primeira
+        const directConversation = matchingConversations[0];
+        console.log(`Conversa direta existente encontrada: ${directConversation.id}`);
+        return directConversation.id;
+      }
+    }
+    
+    console.log("Nenhuma conversa direta encontrada entre os usuários");
+    return null;
+  } catch (error) {
+    console.error("Erro ao buscar conversa direta:", error);
+    return null;
+  }
+}
+
+export async function createConversation(type: "direct" | "group", participants?: string[], title?: string, avatarUrl?: string) {
+  try {
+    const user = await getCurrentUser();
+    
+    if (!user) {
+      throw new Error("Usuário não autenticado");
+    }
+    
+    // Para conversas diretas, verificar se já existe
+    if (type === "direct" && participants && participants.length === 1) {
+      const existingConversationId = await findDirectConversation(user.id, participants[0]);
+      
+      if (existingConversationId) {
+        console.log(`Usando conversa existente: ${existingConversationId}`);
+        return existingConversationId;
+      }
+    }
+    
+    // Criar nova conversa se não existir
+    console.log(`Criando nova conversa ${type}`);
+    const now = new Date().toISOString();
     const { data: conversationData, error: conversationError } = await supabase
       .from("conversations")
       .insert({
@@ -363,18 +428,18 @@ export async function createConversation(type: "direct" | "group", title?: strin
         created_at: now,
         updated_at: now
       })
-      .select()
+      .select();
     
     if (conversationError) {
-      console.error("Erro ao criar conversa:", conversationError)
-      throw conversationError
+      console.error("Erro ao criar conversa:", conversationError);
+      throw conversationError;
     }
     
     if (!conversationData || conversationData.length === 0) {
-      throw new Error("Falha ao criar conversa")
+      throw new Error("Falha ao criar conversa");
     }
     
-    const conversationId = conversationData[0].id
+    const conversationId = conversationData[0].id;
     
     // Adicionar o criador como participante
     const { error: creatorError } = await supabase
@@ -384,11 +449,11 @@ export async function createConversation(type: "direct" | "group", title?: strin
         profile_id: user.id,
         role: "admin",
         created_at: now
-      })
+      });
     
     if (creatorError) {
-      console.error("Erro ao adicionar criador como participante:", creatorError)
-      throw creatorError
+      console.error("Erro ao adicionar criador como participante:", creatorError);
+      throw creatorError;
     }
     
     // Adicionar outros participantes
@@ -398,22 +463,22 @@ export async function createConversation(type: "direct" | "group", title?: strin
         profile_id: participantId,
         role: "member",
         created_at: now
-      }))
+      }));
       
       const { error: participantsError } = await supabase
         .from("conversation_participants")
-        .insert(participantsData)
+        .insert(participantsData);
       
       if (participantsError) {
-        console.error("Erro ao adicionar participantes:", participantsError)
-        throw participantsError
+        console.error("Erro ao adicionar participantes:", participantsError);
+        throw participantsError;
       }
     }
     
-    return conversationId
+    return conversationId;
   } catch (error) {
-    console.error("Erro ao criar conversa:", error)
-    throw error
+    console.error("Erro ao criar conversa:", error);
+    throw error;
   }
 }
 
