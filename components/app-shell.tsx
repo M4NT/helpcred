@@ -1,9 +1,10 @@
 "use client"
 
-import { useState } from "react"
-import { Bell, Cog, HelpCircle, MessageSquare, Users } from "lucide-react"
+import { useEffect, useState } from "react"
+import { Inbox, MessagesSquare, User, Settings, Bell, HelpCircle } from "lucide-react"
 import Image from "next/image"
 
+import { cn } from "@/lib/utils"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -12,16 +13,33 @@ import { NotificationsView } from "@/components/notifications-view"
 import { ProfileView } from "@/components/profile-view"
 import { SettingsView } from "@/components/settings-view"
 import { SupportView } from "@/components/support-view"
+import { ChatView } from "@/components/chat-view"
+import { supabase, getCurrentUser } from "@/lib/supabase"
 
 type View = "chat" | "profile" | "notifications" | "support" | "settings"
 
 export function AppShell() {
   const [currentView, setCurrentView] = useState<View>("chat")
+  const [currentUser, setCurrentUser] = useState<any | null>(null)
+  
+  // Carregar usuário atual ao iniciar
+  useEffect(() => {
+    const loadCurrentUser = async () => {
+      try {
+        const user = await getCurrentUser();
+        setCurrentUser(user);
+      } catch (error) {
+        console.error("Erro ao carregar usuário atual:", error);
+      }
+    };
+    
+    loadCurrentUser();
+  }, []);
 
   const renderMainContent = () => {
     switch (currentView) {
       case "chat":
-        return <Conversation />
+        return <Conversation userId={currentUser?.id} />
       case "profile":
         return <ProfileView />
       case "notifications":
@@ -31,60 +49,70 @@ export function AppShell() {
       case "settings":
         return <SettingsView />
       default:
-        return <Conversation />
+        return <Conversation userId={currentUser?.id} />
     }
   }
 
   return (
     <div className="flex h-screen bg-background">
       {/* Sidebar */}
-      <div className="w-20 border-r flex flex-col items-center py-4 gap-6">
-        <div className="w-12 h-12">
-          <Image src="/placeholder.svg" alt="Logo" width={48} height={48} className="rounded-lg" />
-        </div>
-        <Separator />
+      <div className="w-16 border-r flex flex-col items-center py-4 gap-4">
         <Button
-          variant={currentView === "chat" ? "default" : "ghost"}
+          variant="ghost"
           size="icon"
+          className={cn(
+            "rounded-xl h-10 w-10",
+            currentView === "chat" && "bg-primary text-primary-foreground"
+          )}
           onClick={() => setCurrentView("chat")}
         >
-          <MessageSquare className="h-5 w-5" />
+          <MessagesSquare className="h-5 w-5" />
         </Button>
         <Button
-          variant={currentView === "profile" ? "default" : "ghost"}
+          variant="ghost"
           size="icon"
+          className={cn(
+            "rounded-xl h-10 w-10",
+            currentView === "profile" && "bg-primary text-primary-foreground"
+          )}
           onClick={() => setCurrentView("profile")}
         >
-          <Users className="h-5 w-5" />
+          <User className="h-5 w-5" />
         </Button>
-        <div className="mt-auto flex flex-col gap-4">
-          <Button
-            variant={currentView === "notifications" ? "default" : "ghost"}
-            size="icon"
-            onClick={() => setCurrentView("notifications")}
-          >
-            <Bell className="h-5 w-5" />
-          </Button>
-          <Button
-            variant={currentView === "support" ? "default" : "ghost"}
-            size="icon"
-            onClick={() => setCurrentView("support")}
-          >
-            <HelpCircle className="h-5 w-5" />
-          </Button>
-          <Button
-            variant={currentView === "settings" ? "default" : "ghost"}
-            size="icon"
-            onClick={() => setCurrentView("settings")}
-          >
-            <Cog className="h-5 w-5" />
-          </Button>
-          <Separator />
-          <Avatar className="h-9 w-9">
-            <AvatarImage src="/placeholder.svg" />
-            <AvatarFallback>OP</AvatarFallback>
-          </Avatar>
-        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "rounded-xl h-10 w-10",
+            currentView === "notifications" &&
+              "bg-primary text-primary-foreground"
+          )}
+          onClick={() => setCurrentView("notifications")}
+        >
+          <Bell className="h-5 w-5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "rounded-xl h-10 w-10",
+            currentView === "support" && "bg-primary text-primary-foreground"
+          )}
+          onClick={() => setCurrentView("support")}
+        >
+          <HelpCircle className="h-5 w-5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "rounded-xl h-10 w-10",
+            currentView === "settings" && "bg-primary text-primary-foreground"
+          )}
+          onClick={() => setCurrentView("settings")}
+        >
+          <Settings className="h-5 w-5" />
+        </Button>
       </div>
 
       {/* Main Content Area */}

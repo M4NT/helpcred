@@ -27,5 +27,6 @@ export type Message = {
   fileSize?: number
   sender: "customer" | "agent"
   timestamp: Date
+  receiverId?: string | null
 }
 
