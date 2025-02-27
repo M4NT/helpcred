@@ -10,8 +10,6 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { fetchUserConversations, createConversation, getCurrentUser, supabase, findDirectConversation, startDirectConversation as initDirectConversation } from "@/lib/supabase"
-import { formatDistanceToNow } from "date-fns"
-import { ptBR } from "date-fns/locale"
 import { toast } from "@/components/ui/use-toast"
 
 function getTimeColor(minutes: number) {
@@ -23,8 +21,8 @@ function getTimeColor(minutes: number) {
 // Componente separado para exibir o tempo da última mensagem
 function TimeDisplay({ timestamp }: { timestamp: string | Date | null | undefined }) {
   const [formattedTime, setFormattedTime] = useState<string | null>(null)
-  const [timeColor, setTimeColor] = useState<string>("text-muted-foreground")
   const [mounted, setMounted] = useState(false)
+  const timeRef = useRef<{lastUpdate: number}>({lastUpdate: 0})
   
   useEffect(() => {
     // Marcar que o componente está montado no cliente
@@ -35,27 +33,64 @@ function TimeDisplay({ timestamp }: { timestamp: string | Date | null | undefine
       return
     }
     
-    try {
-      // Converter para Date se for string
-      const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
-      
-      // Verificar se a data é válida
-      if (isNaN(date.getTime())) {
-        console.error("Data inválida:", timestamp)
+    const updateTime = () => {
+      try {
+        // Converter para Date se for string
+        const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
+        
+        // Verificar se a data é válida
+        if (isNaN(date.getTime())) {
+          console.error("Data inválida:", timestamp)
+          setFormattedTime(null)
+          return
+        }
+        
+        // Obter a data atual
+        const now = new Date()
+        
+        // Calcular a diferença em dias
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        const messageDate = new Date(date.getFullYear(), date.getMonth(), date.getDate())
+        const diffTime = today.getTime() - messageDate.getTime()
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24))
+        
+        let formattedOutput = ""
+        
+        // Formatar com base na diferença de dias
+        if (diffDays === 0) {
+          // Hoje - mostrar apenas hora:minuto
+          formattedOutput = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
+        } else if (diffDays === 1) {
+          // Ontem
+          formattedOutput = "ontem"
+        } else {
+          // Dias anteriores - mostrar dia da semana abreviado e dia do mês
+          const diasSemana = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
+          const diaSemana = diasSemana[date.getDay()]
+          const diaMes = date.getDate()
+          formattedOutput = `${diaSemana}, ${diaMes}`
+        }
+        
+        setFormattedTime(formattedOutput)
+        
+        // Atualizar a referência de última atualização
+        timeRef.current.lastUpdate = Date.now()
+      } catch (error) {
+        console.error("Erro ao formatar data:", error)
         setFormattedTime(null)
-        return
       }
-      
-      const timeAgo = formatDistanceToNow(date, { locale: ptBR, addSuffix: true })
-      
-      // Calcular minutos desde a última mensagem
-      const minutesAgo = Math.floor((Date.now() - date.getTime()) / (1000 * 60))
-      setTimeColor(getTimeColor(minutesAgo))
-      setFormattedTime(timeAgo)
-    } catch (error) {
-      console.error("Erro ao formatar data:", error)
-      setFormattedTime(null)
     }
+    
+    // Atualizar imediatamente
+    updateTime()
+    
+    // Configurar intervalo para atualizar o tempo apenas a cada minuto
+    // em vez de a cada renderização
+    const interval = setInterval(() => {
+      updateTime()
+    }, 60000) // Atualizar a cada minuto
+    
+    return () => clearInterval(interval)
   }, [timestamp])
   
   // Apenas no cliente e quando montado, renderizar o conteúdo
@@ -68,7 +103,7 @@ function TimeDisplay({ timestamp }: { timestamp: string | Date | null | undefine
   if (!formattedTime) return null;
   
   return (
-    <span className={`text-xs font-medium ${timeColor}`} suppressHydrationWarning>
+    <span className="text-xs font-medium text-gray-400" suppressHydrationWarning>
       {formattedTime}
     </span>
   )
@@ -104,7 +139,7 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
   const [isCreatingGroup, setIsCreatingGroup] = useState(false)
   const [groupName, setGroupName] = useState("")
   const [isLoading, setIsLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<"conversations" | "users">("conversations")
+  const [activeTab, setActiveTab] = useState<"groups" | "conversations">("conversations")
   const [fileToUpload, setFileToUpload] = useState<File | null>(null)
   const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
@@ -116,6 +151,17 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
   // Adicionar estado para controlar tentativas de re-autenticação
   const [authAttempted, setAuthAttempted] = useState(false)
   const authTimerRef = useRef<NodeJS.Timeout | null>(null)
+  
+  // Referência para controlar atualizações em segundo plano
+  const backgroundUpdateRef = useRef<{
+    lastUpdate: number;
+    isUpdating: boolean;
+    pendingUpdate: boolean;
+  }>({
+    lastUpdate: 0,
+    isUpdating: false,
+    pendingUpdate: false
+  })
 
   // Função para recuperar o ID do usuário do localStorage
   const getPersistedUserId = (): string | null => {
@@ -182,12 +228,35 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
   }, []);
 
   // Função para buscar lista de conversas
-  const fetchConversations = async (userId: string) => {
-    setIsLoading(true);
+  const fetchConversations = async (userId: string, options?: { silent?: boolean; force?: boolean }) => {
+    const silent = options?.silent || false;
+    const force = options?.force || false;
+    
+    // Verificar se já estamos atualizando ou se a última atualização foi muito recente (menos de 30 segundos)
+    const now = Date.now();
+    if (!force && backgroundUpdateRef.current.isUpdating) {
+      console.log("[CONV LIST DEBUG] Atualização já em andamento, marcando como pendente");
+      backgroundUpdateRef.current.pendingUpdate = true;
+      return;
+    }
+    
+    if (!force && !silent && now - backgroundUpdateRef.current.lastUpdate < 30000) {
+      console.log("[CONV LIST DEBUG] Última atualização muito recente, ignorando");
+      return;
+    }
+    
+    // Marcar que estamos atualizando
+    backgroundUpdateRef.current.isUpdating = true;
+    
+    // Apenas mostrar loading se não for uma atualização silenciosa
+    if (!silent) {
+      setIsLoading(true);
+    }
+    
     setLoadError(null);
     
     try {
-      console.log(`Buscando conversas para usuário ${userId}`);
+      console.log(`Buscando conversas para usuário ${userId}${silent ? ' (silenciosamente)' : ''}`);
       
       // Verificar se temos conversas em cache
       let cachedConversations = [];
@@ -198,105 +267,105 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
           // Usar dados em cache apenas se forem recentes (menos de 5 minutos)
           const cacheTime = new Date(parsed.timestamp).getTime();
           const now = new Date().getTime();
-          const fiveMinutes = 5 * 60 * 1000;
           
-          if (now - cacheTime < fiveMinutes) {
-            cachedConversations = parsed.conversations || [];
-            console.log(`Carregadas ${cachedConversations.length} conversas do cache`);
+          // Se o cache for recente e não estamos forçando atualização, usar o cache
+          if (!force && now - cacheTime < 5 * 60 * 1000) {
+            console.log(`Usando ${parsed.data.length} conversas do cache (${Math.floor((now - cacheTime) / 1000)}s atrás)`);
+            cachedConversations = parsed.data;
             
-            if (cachedConversations.length > 0) {
+            // Se for uma atualização silenciosa e temos dados em cache, atualizar o estado sem mostrar loading
+            if (silent) {
               setConversations(cachedConversations);
-              // Filtrar conversas conforme a aba atual (Conversas ou Usuários)
-              const filtered = filterConversationsByTab(cachedConversations, activeTab);
-              setConversations(filtered);
-              setIsLoading(false);
+              backgroundUpdateRef.current.lastUpdate = now;
+              backgroundUpdateRef.current.isUpdating = false;
+              
+              // Verificar se há uma atualização pendente
+              if (backgroundUpdateRef.current.pendingUpdate) {
+                backgroundUpdateRef.current.pendingUpdate = false;
+                // Agendar uma nova atualização em segundo plano após um pequeno delay
+                setTimeout(() => fetchConversations(userId, { silent: true }), 1000);
+              }
+              
+              return;
             }
           }
         }
       } catch (err) {
-        console.warn("Erro ao acessar cache de conversas:", err);
+        console.error("Erro ao carregar conversas do cache:", err);
       }
       
-      // Buscar conversas diretas
-      const { data: directData, error: directError } = await supabase
-        .from("direct_conversations_with_profiles")
-        .select("*")
-        .or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
+      // Buscar conversas do servidor
+      const data = await fetchUserConversations(userId);
+      console.log(`Recebidas ${data.length} conversas do servidor`);
       
-      if (directError) {
-        console.error("Erro ao buscar conversas diretas:", directError);
-        throw directError;
-      }
-      
-      // Buscar conversas em grupo
-      const { data: groupData, error: groupError } = await supabase
-        .from("group_conversations_with_participants")
-        .select("*")
-        .contains("participants", [userId]);
-      
-      if (groupError) {
-        console.error("Erro ao buscar conversas em grupo:", groupError);
-        throw groupError;
-      }
-
-      // Combinar conversas do servidor e do localStorage
-      const allConversations = [...directData, ...groupData];
-      
-      // Ordenar por data da última mensagem (mais recente primeiro)
-      allConversations.sort((a, b) => {
-        const dateA = new Date(a.lastMessageTime || a.updated_at || 0);
-        const dateB = new Date(b.lastMessageTime || b.updated_at || 0);
-        return dateB.getTime() - dateA.getTime();
-      });
-      
-      console.log(`[CONV DEBUG] Carregadas ${allConversations.length} conversas para exibição`);
-      setConversations(allConversations || [])
-      
-      // Tentar recuperar a última conversa ativa do localStorage
-      let lastActiveConversation = null;
+      // Salvar no cache
       try {
-        lastActiveConversation = localStorage.getItem('last_active_conversation');
+        localStorage.setItem(`conversations_${userId}`, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          data
+        }));
       } catch (err) {
-        console.warn("Erro ao recuperar última conversa ativa:", err);
+        console.error("Erro ao salvar conversas no cache:", err);
       }
       
-      // Se temos uma conversa prioritária ou salva, verificar se ela está na lista
-      const targetId = lastActiveConversation || lastSelectedConversationId;
+      // Atualizar estado apenas se houver mudanças ou se for forçado
+      const hasChanges = !cachedConversations.length || 
+                         JSON.stringify(data) !== JSON.stringify(cachedConversations);
       
-      if (targetId) {
-        console.log(`[CONV DEBUG] Verificando existência da conversa prioritária: ${targetId}`);
-        
-        const targetConversation = allConversations.find(
-          (conv: Conversation) => conv.id === targetId
-        );
-        
-        // Se encontramos a conversa, podemos restaurá-la
-        if (targetConversation) {
-          console.log("[CONV DEBUG] Restaurando conversa prioritária:", targetConversation.id);
-          setTimeout(() => {
-            handleConversationClick(targetConversation);
-          }, 500);
-        } else {
-          console.log(`[CONV DEBUG] Conversa prioritária ${targetId} não encontrada na lista final`);
+      if (hasChanges || force) {
+        setConversations(data);
+      } else if (silent) {
+        console.log("[CONV LIST DEBUG] Nenhuma mudança detectada, mantendo estado atual");
+      }
+      
+      // Atualizar timestamp da última atualização
+      backgroundUpdateRef.current.lastUpdate = now;
+      
+      // Se tiver uma conversa selecionada anteriormente, verificar se ainda existe
+      if (lastSelectedConversationId) {
+        const conversationExists = data.some(c => c.id === lastSelectedConversationId);
+        if (!conversationExists) {
+          console.log(`Conversa selecionada ${lastSelectedConversationId} não existe mais`);
+          setLastSelectedConversationId(null);
         }
       }
     } catch (error) {
-      console.error("[CONV DEBUG] Erro ao buscar conversas:", error)
-      toast({
-        title: "Erro ao carregar conversas",
-        description: "Não foi possível carregar suas conversas. Tente novamente mais tarde.",
-        variant: "destructive"
-      });
+      console.error("Erro ao buscar conversas:", error);
+      setLoadError("Não foi possível carregar suas conversas. Tente novamente mais tarde.");
+      
+      // Em caso de erro, tentar usar o cache
+      try {
+        const cachedData = localStorage.getItem(`conversations_${userId}`);
+        if (cachedData) {
+          const parsed = JSON.parse(cachedData);
+          console.log(`Usando ${parsed.data.length} conversas do cache devido a erro`);
+          setConversations(parsed.data);
+        }
+      } catch (err) {
+        console.error("Erro ao usar cache após falha:", err);
+      }
     } finally {
-      setIsLoading(false)
+      // Finalizar loading apenas se não for silencioso
+      if (!silent) {
+        setIsLoading(false);
+      }
+      
+      // Marcar que não estamos mais atualizando
+      backgroundUpdateRef.current.isUpdating = false;
+      
+      // Verificar se há uma atualização pendente
+      if (backgroundUpdateRef.current.pendingUpdate) {
+        backgroundUpdateRef.current.pendingUpdate = false;
+        // Agendar uma nova atualização em segundo plano após um pequeno delay
+        setTimeout(() => fetchConversations(userId, { silent: true }), 1000);
+      }
     }
-  }
+  };
 
   useEffect(() => {
-    // Marcar que estamos no cliente
     setMounted(true)
     
-    // Tentar carregar a última conversa selecionada
+    // Carregar última conversa selecionada do localStorage
     if (typeof window !== 'undefined') {
       try {
         const savedConversation = localStorage.getItem('lastSelectedConversation');
@@ -312,17 +381,32 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
     // Verificar autenticação imediatamente
     checkAuthentication();
     
-    // Configurar verificação periódica de autenticação (a cada 30 segundos)
+    // Configurar verificação periódica de autenticação (a cada 2 minutos em vez de 30 segundos)
     const authInterval = setInterval(() => {
       if (typeof window !== 'undefined' && document.visibilityState === 'visible') {
         checkAuthentication();
       }
-    }, 30000);
+    }, 120000); // Aumentado para 2 minutos (120000ms)
+    
+    // Configurar atualização periódica em segundo plano
+    const backgroundUpdateInterval = setInterval(() => {
+      if (typeof window !== 'undefined' && currentUserId) {
+        // Atualizar silenciosamente em segundo plano
+        fetchConversations(currentUserId, { silent: true });
+      }
+    }, 60000); // Atualizar a cada 1 minuto
     
     // Verificar quando o documento volta a ficar visível
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        checkAuthentication();
+      if (document.visibilityState === 'visible' && currentUserId) {
+        // Quando a página volta a ficar visível, atualizar silenciosamente
+        fetchConversations(currentUserId, { silent: true });
+        
+        // Verificar autenticação apenas se a última verificação foi há mais de 2 minutos
+        const now = Date.now();
+        if (now - (backgroundUpdateRef.current.lastUpdate || 0) > 120000) {
+          checkAuthentication();
+        }
       }
     };
     
@@ -480,90 +564,54 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
         }
       }
       
-      // De qualquer forma, atualizar a lista completa para garantir
-      setTimeout(() => {
-        console.log("[CONV DEBUG] Atualizando lista de conversas após evento de mensagem");
-        fetchConversations(userId);
-      }, 500); // Reduzido para 500ms para ser mais rápido
-    };
-    
-    // Registrar o listener
-    if (typeof window !== 'undefined') {
-      window.addEventListener('messageWasSent', handleMessageSent);
-      
-      // Verificar também se há alguma conversa ativa no localStorage que não está sendo mostrada
-      if (currentUserId) {
-        try {
-          const lastActiveConversation = localStorage.getItem('last_active_conversation');
-          if (lastActiveConversation && !conversations.some(c => c.id === lastActiveConversation)) {
-            console.log(`[CONV DEBUG] Há uma conversa ativa (${lastActiveConversation}) que não está sendo mostrada`);
-            fetchConversations(currentUserId);
-          }
-        } catch (e) {
-          console.error("[CONV DEBUG] Erro ao verificar conversa ativa:", e);
-        }
+      // Atualizar a lista em segundo plano após um evento de mensagem
+      if (userId) {
+        setTimeout(() => {
+          console.log("[CONV DEBUG] Atualizando lista de conversas após evento de mensagem");
+          fetchConversations(userId, { silent: true });
+        }, 1000); // Reduzido para 1 segundo e silencioso
       }
-    }
+    };
     
     fetchAllUsers();
     
-    // Limpar os listeners e intervalos na desmontagem
     return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('messageWasSent', handleMessageSent);
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-        clearInterval(authInterval);
-      }
+      clearInterval(authInterval);
+      clearInterval(backgroundUpdateInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('messageWasSent', handleMessageSent);
+      
       if (authTimerRef.current) {
         clearTimeout(authTimerRef.current);
       }
     };
-  }, [currentUserId, conversations, checkAuthentication]);
+  }, [checkAuthentication, currentUserId, conversations]);
 
   // Função para filtrar conversas com base na aba ativa
-  const filterConversationsByTab = (convs: Conversation[], tab: "conversations" | "users"): Conversation[] => {
+  const filterConversationsByTab = (convs: Conversation[], tab: "groups" | "conversations"): Conversation[] => {
     return convs.filter(conversation => {
       // Garantir que a conversa tem todos os campos necessários
       if (!conversation || typeof conversation !== 'object') return false;
       
       // Filtrar conforme a aba
-      if (tab === "users") {
-        // Na aba de usuários, não mostrar conversas
-        return false;
-      }
-      
-      // Na aba de conversas, filtrar pelo termo de busca
-      // Para conversas diretas, filtrar pelo nome do outro participante
-      if (conversation.type === "direct") {
-        // Verificar se profiles existe e é um array
-        const profiles = conversation.profiles || [];
-        
-        const otherParticipants = profiles.filter(
-          profile => profile && profile.id !== currentUserId
-        );
-        
-        if (otherParticipants.length > 0) {
-          const otherUser = otherParticipants[0];
-          const fullName = `${otherUser.first_name || ''} ${otherUser.last_name || ''}`.trim().toLowerCase();
-          const email = (otherUser.email || '').toLowerCase();
-          
-          return fullName.includes(searchTerm.toLowerCase()) || email.includes(searchTerm.toLowerCase());
-        }
-      } else {
-        // Para grupos
-        const title = (conversation.title || '').toLowerCase();
-        return title.includes(searchTerm.toLowerCase());
+      if (tab === "conversations") {
+        // Na aba de conversas, mostrar apenas conversas diretas
+        return conversation.type === "direct";
+      } else if (tab === "groups") {
+        // Na aba de grupos, mostrar apenas grupos
+        return conversation.type === "group";
       }
       
       return false;
     });
   };
 
-  const filteredConversations = conversations.filter(conversation => {
+  // Filtrar conversas diretas para a aba de Conversas
+  const filteredDirectConversations = conversations.filter(conversation => {
     // Garantir que a conversa tem todos os campos necessários
     if (!conversation || typeof conversation !== 'object') return false;
     
-    // Para conversas diretas, filtrar pelo nome do outro participante
+    // Mostrar apenas conversas diretas
     if (conversation.type === "direct") {
       // Verificar se profiles existe e é um array
       const profiles = conversation.profiles || [];
@@ -582,14 +630,23 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       }
     }
     
-    // Para grupos, filtrar pelo título
+    return false;
+  });
+
+  // Filtrar grupos para a aba de Grupos
+  const filteredGroupConversations = conversations.filter(conversation => {
+    // Garantir que a conversa tem todos os campos necessários
+    if (!conversation || typeof conversation !== 'object') return false;
+    
+    // Mostrar apenas grupos
     if (conversation.type === "group" && conversation.title) {
       return conversation.title.toLowerCase().includes(searchTerm.toLowerCase());
     }
     
     return false;
-  })
+  });
 
+  // Filtrar usuários para a lista de contatos (para iniciar novas conversas)
   const filteredUsers = users.filter(user => {
     if (user.id === currentUserId) return false
     
@@ -598,398 +655,97 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
     const term = searchTerm.toLowerCase()
     
     return fullName.includes(term) || email.includes(term)
-  })
+  });
 
-  // Versão simplificada para obter ou criar uma sala de chat
-  const getOrCreateChatRoom = async (otherUserId: string): Promise<string | null> => {
-    if (!currentUserId) {
-      console.error("[CHAT DEBUG] Usuário não autenticado, não é possível iniciar conversa");
+  // Função de fallback para seleção de conversa em caso de erro
+  const fallbackSelection = (conversationId: string) => {
+    // Verificar se temos dados do destinatário salvos no localStorage
+    try {
+      const savedData = getSavedRecipientData(conversationId);
+      
+      if (savedData) {
+        console.log("Usando dados do destinatário salvos para fallback:", savedData);
+        onSelectConversation(conversationId, { 
+          id: conversationId,
+          type: "direct",
+          recipientData: savedData
+        });
+      } else {
+        // Dados genéricos como último recurso
+        const genericData = {
+          id: conversationId,
+          type: "direct",
+          recipientData: {
+            id: "",
+            name: "Usuário",
+            email: "Conversa direta",
+            avatar: null
+          }
+        };
+        
+        console.log("Selecionando conversa com dados genéricos (fallback)");
+        onSelectConversation(conversationId, genericData);
+      }
+    } catch (err) {
+      console.error("Erro no fallback de seleção:", err);
+      // Último recurso
+      onSelectConversation(conversationId, { 
+        id: conversationId,
+        type: "direct" 
+      });
+    }
+  };
+
+  // Função para buscar perfil de usuário pelo ID
+  const fetchUserProfileById = async (userId: string): Promise<any | null> => {
+    try {
+      console.log(`Buscando perfil do usuário ${userId} do banco de dados`);
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name, email, avatar_url')
+        .eq('id', userId)
+        .single();
+        
+      if (error) {
+        console.error(`Erro ao buscar perfil do usuário ${userId}:`, error);
+        return null;
+      }
+      
+      if (!data) {
+        console.warn(`Nenhum perfil encontrado para o usuário ${userId}`);
+        return null;
+      }
+      
+      console.log(`Perfil do usuário ${userId} obtido com sucesso:`, data);
+      return data;
+    } catch (err) {
+      console.error(`Erro inesperado ao buscar perfil do usuário ${userId}:`, err);
       return null;
     }
-    
-    console.log("[CHAT DEBUG] Buscando ou criando conversa entre", currentUserId, "e", otherUserId);
-    
-    try {
-      // ESTRATÉGIA 1: Verificar na lista de conversas local
-      console.log("[CHAT DEBUG] Estratégia 1: Verificando lista de conversas local");
-      const localConversation = conversations.find(conversation => {
-        if (conversation.type === "direct") {
-          // Verificar por participantes
-          if (conversation.profiles) {
-            return conversation.profiles.some((profile: any) => profile.id === otherUserId);
-          }
-          
-          // Verificar por ID determinístico
-          const userIds = [currentUserId, otherUserId].sort();
-          const deterministicId = `${userIds[0]}_${userIds[1]}`;
-          
-          if (conversation.id === deterministicId || 
-              conversation.id.includes(deterministicId)) {
-            return true;
-          }
-        }
-        return false;
-      });
-      
-      if (localConversation) {
-        console.log("[CHAT DEBUG] Encontrada conversa na lista local:", localConversation.id);
-        return localConversation.id;
-      }
-      
-      // ESTRATÉGIA 2: Usar a nova função simplificada que sempre retorna um ID válido
-      try {
-        console.log("[CHAT DEBUG] Estratégia 2: Usando função robusta startDirectConversation");
-        const conversationId = await initDirectConversation(currentUserId, otherUserId);
-        
-        console.log("[CHAT DEBUG] Conversa iniciada com sucesso:", conversationId);
-        
-        // Salvando no cache para uso futuro
-        try {
-          if (typeof window !== 'undefined') {
-            const cachedConversationIds = JSON.parse(localStorage.getItem('conversationIds') || '[]');
-            if (!cachedConversationIds.some((entry: any) => entry.id === conversationId)) {
-              cachedConversationIds.push({ 
-                id: conversationId, 
-                users: [currentUserId, otherUserId],
-                timestamp: new Date().toISOString() 
-              });
-              localStorage.setItem('conversationIds', JSON.stringify(cachedConversationIds));
-            }
-          }
-        } catch (cacheError) {
-          console.warn("[CHAT DEBUG] Erro ao salvar ID no cache:", cacheError);
-        }
-        
-        return conversationId;
-      } catch (error) {
-        console.error("[CHAT DEBUG] Erro ao usar startDirectConversation:", error);
-        // Continuar para o fallback
-      }
-      
-      // ESTRATÉGIA 3: Fallback - criar ID determinístico localmente
-      console.log("[CHAT DEBUG] Estratégia 3: Criando ID determinístico como fallback");
-      const userIds = [currentUserId, otherUserId].sort();
-      const fallbackId = `local_${userIds[0]}_${userIds[1]}`;
-      console.log("[CHAT DEBUG] Usando ID determinístico como fallback:", fallbackId);
-      
-      return fallbackId;
-      
-    } catch (error) {
-      console.error("[CHAT DEBUG] Erro geral ao obter/criar sala de chat:", error);
-      
-      // Em caso de erro total, ainda retornar um ID utilizável
-      const userIds = [currentUserId, otherUserId].sort();
-      const emergencyId = `emergency_${userIds[0]}_${userIds[1]}`;
-      console.log("[CHAT DEBUG] Usando ID de emergência:", emergencyId);
-      
-      return emergencyId;
-    }
   };
-
-  // Versão simplificada da função de clique em usuário
-  const handleUserClick = async (user: User) => {
-    if (isCreatingConversation) {
-      console.log("Já está criando outra conversa, ignorando clique");
-      return;
-    }
-    
-    if (!currentUserId) {
-      console.error("Usuário não autenticado, não é possível iniciar conversa");
-      return;
-    }
+  
+  // Função para recuperar dados do destinatário do localStorage
+  const getSavedRecipientData = (conversationId: string): { name: string; email: string; avatar: string | null } | null => {
+    if (typeof window === 'undefined') return null;
     
     try {
-      setIsCreatingConversation(true);
-      console.log("[CHAT DEBUG] Iniciando criação de sala para o usuário:", user.id, user.email);
+      const recipientKey = `recipient_${conversationId}`;
+      const savedData = localStorage.getItem(recipientKey);
       
-      // PASSO 1: Verificar na cache local para respostas imediatas
-      // Verificar conversas existentes com este usuário
-      const existingConversation = conversations.find(conversation => {
-        // Para conversas diretas
-        if (conversation.type === "direct") {
-          // Verificar se o ID da conversa contém os IDs dos dois usuários
-          const conversationId = conversation.id;
-          return conversationId.includes(currentUserId) && conversationId.includes(user.id);
-        }
-        return false;
-      });
-      
-      if (existingConversation) {
-        console.log("[CHAT DEBUG] Conversa existente encontrada localmente:", existingConversation.id);
-        // Usar a conversa existente
-        handleConversationClick(existingConversation);
-        setTimeout(() => {
-          setIsCreatingConversation(false);
-        }, 500);
-        return;
-      }
-      
-      // PASSO 2: Obter ou criar uma sala para este par de usuários (camada robusta)
-      console.log("[CHAT DEBUG] Buscando ou criando sala de chat...");
-      const roomId = await getOrCreateChatRoom(user.id);
-      
-      if (!roomId) {
-        console.error("[CHAT DEBUG] Falha ao obter/criar sala de chat, criando ID temporário...");
-        
-        // Criar um ID determinístico como fallback
-        const userIds = [currentUserId, user.id].sort();
-        const fallbackId = `temp_${userIds[0]}_${userIds[1]}`;
-        
-        console.log("[CHAT DEBUG] Usando ID temporário para conversa:", fallbackId);
-        
-        // Dados do outro usuário para exibir no chat
-        const userData = {
-          name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Usuário',
-          email: user.email || '',
-          avatar: user.avatar_url
+      if (savedData) {
+        const parsedData = JSON.parse(savedData);
+        console.log(`Dados do destinatário recuperados do localStorage para conversa ${conversationId}:`, parsedData);
+        return {
+          name: parsedData.name || 'Usuário',
+          email: parsedData.email || 'Conversa direta',
+          avatar: parsedData.avatar || null
         };
-        
-        // Salvar o ID da conversa
-        setLastSelectedConversationId(fallbackId);
-        
-        // Passar diretamente para o modo de visualização de conversa
-        console.log("[CHAT DEBUG] Chamando onSelectConversation com ID temporário:", fallbackId);
-        onSelectConversation(fallbackId, userData);
-        
-        // Atualizar a interface
-        setActiveTab("conversations");
-        
-        toast({
-          title: "Aviso de conexão",
-          description: "Usando modo offline temporário. Suas mensagens serão sincronizadas quando a conexão for restaurada.",
-          variant: "default"
-        });
-        
-        setTimeout(() => {
-          setIsCreatingConversation(false);
-        }, 500);
-        return;
       }
-      
-      // Dados do outro usuário para exibir no chat
-      const userData = {
-        name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Usuário',
-        email: user.email || '',
-        avatar: user.avatar_url
-      };
-      
-      console.log("[CHAT DEBUG] Sala de chat criada ou obtida com sucesso:", roomId);
-      console.log("[CHAT DEBUG] Dados do usuário para a conversa:", userData);
-      
-      // Salvar o ID da conversa
-      setLastSelectedConversationId(roomId);
-      
-      // Passar diretamente para o modo de visualização de conversa, sem esperar atualizações
-      console.log("[CHAT DEBUG] Chamando onSelectConversation diretamente com:", roomId, userData);
-      onSelectConversation(roomId, userData);
-      
-      // Apenas depois disso, atualizar a interface
-      setActiveTab("conversations");
-      
-      // Salvar os dados do usuário no localStorage para recuperação
-      try {
-        if (typeof window !== 'undefined') {
-          const recipientKey = `recipient_${roomId}`;
-          localStorage.setItem(recipientKey, JSON.stringify(userData));
-          
-          const tempConversation: Conversation = {
-            id: roomId,
-            type: "direct",
-            profiles: [user],
-            lastMessageTime: new Date().toISOString()
-          };
-          
-          // Adicionar a conversa à lista local se não existir
-          setConversations(prev => {
-            if (prev.some(c => c.id === roomId)) {
-              return prev;
-            }
-            return [tempConversation, ...prev];
-          });
-        }
-      } catch (cacheError) {
-        console.warn("[CHAT DEBUG] Erro ao salvar dados de conversa:", cacheError);
-      }
-      
-      // Atualizar a lista de conversas em segundo plano
-      if (currentUserId) {
-        fetchConversations(currentUserId)
-          .then(() => {
-            console.log("[CHAT DEBUG] Lista de conversas atualizada em segundo plano");
-          })
-          .catch(err => {
-            console.error("[CHAT DEBUG] Erro ao atualizar lista de conversas:", err);
-          });
-      }
-    } catch (error) {
-      console.error("[CHAT DEBUG] Erro ao processar sala de chat:", error);
-      
-      // Criar ID determinístico e dados temporários para garantir a UX
-      const userIds = [currentUserId, user.id].sort();
-      const emergencyId = `emergency_${userIds[0]}_${userIds[1]}`;
-      
-      const userData = {
-        name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Usuário',
-        email: user.email || '',
-        avatar: user.avatar_url
-      };
-      
-      console.log("[CHAT DEBUG] Usando ID de emergência:", emergencyId);
-      setLastSelectedConversationId(emergencyId);
-      onSelectConversation(emergencyId, userData);
-      setActiveTab("conversations");
-      
-      toast({
-        title: "Modo de emergência ativado",
-        description: "Usando conversa temporária devido a problemas técnicos. Suas mensagens serão sincronizadas quando possível.",
-        variant: "destructive"
-      });
-    } finally {
-      // Definir um pequeno atraso antes de permitir nova criação de conversa
-      // para evitar cliques duplicados acidentais
-      setTimeout(() => {
-        setIsCreatingConversation(false);
-      }, 500);
-    }
-  };
-
-  // Simplificar também o clique em conversa existente
-  const handleConversationClick = async (conversation: Conversation) => {
-    if (!onSelectConversation) {
-      console.error("[CONV LIST DEBUG] Callback onSelectConversation não fornecido");
-      return;
+    } catch (err) {
+      console.error(`Erro ao recuperar dados do destinatário do localStorage para conversa ${conversationId}:`, err);
     }
     
-    let userId = currentUserId;
-    
-    if (!userId) {
-      console.warn("[CONV LIST DEBUG] Usuário não autenticado, tentando recuperar autenticação");
-      
-      // Primeiro, tentar recuperar do localStorage
-      userId = getPersistedUserId();
-      
-      // Se não encontrou no localStorage, tentar re-autenticar
-      if (!userId) {
-        userId = await checkAuthentication();
-      }
-      
-      // Se ainda não temos userId, não podemos prosseguir
-      if (!userId) {
-        console.error("[CONV LIST DEBUG] Não foi possível autenticar usuário para selecionar conversa");
-        toast({
-          title: "Erro de autenticação",
-          description: "Você precisa estar logado para acessar conversas. Faça login e tente novamente.",
-          variant: "destructive"
-        });
-        return;
-      }
-      
-      // Se obtivemos o userId, atualizar o estado
-      setCurrentUserId(userId);
-    }
-    
-    console.log("[CONV LIST DEBUG] Processando clique na conversa:", conversation.id);
-    
-    try {
-      setLastSelectedConversationId(conversation.id);
-      
-      // Se for uma conversa direta, tentar resolver o destinatário
-      if (conversation.type === "direct") {
-        // Verificar se o ID segue o formato user1_user2
-        if (conversation.id && conversation.id.includes('_')) {
-          const userIds = conversation.id.split('_');
-          const otherUserId = userIds[0] === currentUserId ? userIds[1] : userIds[0];
-          
-          console.log(`Possível ID de destinatário encontrado: ${otherUserId}`);
-          
-          // Buscar dados do outro usuário
-          if (otherUserId) {
-            const otherUserData = users.find(u => u.id === otherUserId);
-            
-            if (otherUserData) {
-              const conversationData = {
-                name: `${otherUserData.first_name || ''} ${otherUserData.last_name || ''}`.trim() || 'Usuário',
-                email: otherUserData.email || '',
-                avatar: otherUserData.avatar_url
-              };
-              
-              console.log("Selecionando conversa com dados do usuário encontrado:", otherUserData.email);
-              onSelectConversation(conversation.id, conversationData);
-              return;
-            }
-            
-            // Se não encontrou dados do usuário na lista local, buscar do banco
-            fetchUserProfileById(otherUserId).then(profile => {
-              if (profile) {
-                const conversationData = {
-                  name: `${profile.first_name || ''} ${profile.last_name || ''}`.trim() || 'Usuário',
-                  email: profile.email || '',
-                  avatar: profile.avatar_url
-                };
-                
-                console.log("Selecionando conversa com dados do usuário buscados do banco:", profile.email);
-                onSelectConversation(conversation.id, conversationData);
-              } else {
-                // Se ainda não conseguiu dados, tentar buscar informações salvas
-                const savedData = getSavedRecipientData(conversation.id);
-                if (savedData) {
-                  console.log("Usando dados do destinatário salvos localmente:", savedData);
-                  onSelectConversation(conversation.id, savedData);
-                } else {
-                  fallbackSelection();
-                }
-              }
-            }).catch(() => {
-              fallbackSelection();
-            });
-            return;
-          }
-        }
-        
-        // Função de seleção com dados genéricos como fallback
-        const fallbackSelection = () => {
-          // Verificar se temos dados do destinatário salvos no localStorage
-          const savedData = getSavedRecipientData(conversation.id);
-          
-          if (savedData && (savedData.name !== 'Usuário' || savedData.email !== 'Conversa direta')) {
-            console.log("Usando dados do destinatário salvos:", savedData);
-            onSelectConversation(conversation.id, savedData);
-          } else {
-            const conversationData = {
-              name: 'Usuário',
-              email: 'Conversa direta',
-              avatar: null
-            };
-            
-            console.log("Selecionando conversa com dados genéricos");
-            onSelectConversation(conversation.id, conversationData);
-          }
-        };
-        
-        fallbackSelection();
-      } else { // Para grupos
-        const profiles = conversation.profiles || [];
-        const conversationData = {
-          name: conversation.title || 'Grupo',
-          email: `${profiles.length} participantes`,
-          avatar: conversation.avatar_url
-        };
-        
-        console.log("Selecionando conversa de grupo:", conversation.title || 'Grupo');
-        onSelectConversation(conversation.id, conversationData);
-      }
-    } catch (error) {
-      console.error("Erro ao selecionar conversa:", error);
-      // Fallback para garantir que algo seja selecionado mesmo em caso de erro
-      const conversationData = {
-        name: 'Conversa',
-        email: '',
-        avatar: null
-      };
-      
-      console.log("Selecionando conversa após erro");
-      onSelectConversation(conversation.id, conversationData);
-    }
+    return null;
   };
 
   // Função segura para criar um grupo
@@ -1106,7 +862,7 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
       
       // Recarregar conversas
       if (currentUserId) {
-        await fetchConversations(currentUserId);
+        await fetchConversations(currentUserId, { silent: false, force: true });
         console.log("Conversas recarregadas após criação de grupo");
       }
       
@@ -1225,101 +981,105 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
     } finally {
       setIsCreatingConversation(false);
     }
-  };
-  
-  // Atualizar a lista de conversas periodicamente para garantir sincronização
-  useEffect(() => {
-    if (!currentUserId || !mounted) return;
-    
-    // Atualizar a cada 30 segundos para manter sincronizado
-    const interval = setInterval(() => {
-      if (currentUserId) {
-        fetchConversations(currentUserId)
-          .then(() => {
-            console.log("Lista de conversas atualizada automaticamente");
-          })
-          .catch(err => console.error("Erro ao atualizar conversas:", err));
-      }
-    }, 30000);
-    
-    return () => clearInterval(interval);
-  }, [currentUserId, mounted]);
+  }
 
-  // Função para buscar perfil de usuário pelo ID
-  const fetchUserProfileById = async (userId: string): Promise<any | null> => {
-    try {
-      console.log(`Buscando perfil do usuário ${userId} do banco de dados`);
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, first_name, last_name, email, avatar_url')
-        .eq('id', userId)
-        .single();
-        
-      if (error) {
-        console.error(`Erro ao buscar perfil do usuário ${userId}:`, error);
-        return null;
-      }
-      
-      if (!data) {
-        console.warn(`Nenhum perfil encontrado para o usuário ${userId}`);
-        return null;
-      }
-      
-      console.log(`Perfil do usuário ${userId} obtido com sucesso:`, data);
-      return data;
-    } catch (err) {
-      console.error(`Erro inesperado ao buscar perfil do usuário ${userId}:`, err);
-      return null;
+  const handleConversationClick = (conversation: Conversation) => {
+    // Evitar processamento se a conversa não tiver ID
+    if (!conversation || !conversation.id) {
+      console.error("Tentativa de selecionar conversa inválida:", conversation);
+      return;
     }
-  };
-  
-  // Função para recuperar dados do destinatário do localStorage
-  const getSavedRecipientData = (conversationId: string): { name: string; email: string; avatar: string | null } | null => {
-    if (typeof window === 'undefined') return null;
-    
-    try {
-      const recipientKey = `recipient_${conversationId}`;
-      const savedData = localStorage.getItem(recipientKey);
+
+    // Atualizar o ID da última conversa selecionada
+    setLastSelectedConversationId(conversation.id);
+
+    // Preparar os dados para passar ao callback
+    let conversationData: any = {
+      id: conversation.id,
+      type: conversation.type
+    };
+
+    if (conversation.type === "direct") {
+      // Para conversas diretas, extrair informações do outro participante
+      const profiles = conversation.profiles || [];
+      const otherParticipants = profiles.filter(
+        profile => profile && profile.id !== currentUserId
+      );
       
-      if (savedData) {
-        const parsedData = JSON.parse(savedData);
-        console.log(`Dados do destinatário recuperados do localStorage para conversa ${conversationId}:`, parsedData);
-        return {
-          name: parsedData.name || 'Usuário',
-          email: parsedData.email || 'Conversa direta',
-          avatar: parsedData.avatar || null
+      if (otherParticipants.length > 0) {
+        const otherUser = otherParticipants[0];
+        conversationData = {
+          ...conversationData,
+          profiles: conversation.profiles,
+          recipientName: `${otherUser.first_name || ''} ${otherUser.last_name || ''}`.trim() || 'Usuário',
+          recipientEmail: otherUser.email || '',
+          recipientAvatar: otherUser.avatar_url || "/placeholder.svg"
+        };
+      } else {
+        // Fallback se não encontrar participantes
+        conversationData = {
+          ...conversationData,
+          profiles: conversation.profiles,
+          recipientName: 'Usuário',
+          recipientEmail: 'Conversa direta',
+          recipientAvatar: "/placeholder.svg"
         };
       }
-    } catch (err) {
-      console.error(`Erro ao recuperar dados do destinatário do localStorage para conversa ${conversationId}:`, err);
+    } else if (conversation.type === "group") {
+      // Para grupos
+      conversationData = {
+        ...conversationData,
+        title: conversation.title || 'Grupo',
+        profiles: conversation.profiles,
+        avatar_url: conversation.avatar_url || "/placeholder.svg"
+      };
     }
-    
-    return null;
+
+    // Chamar o callback com os dados processados
+    onSelectConversation(conversation.id, conversationData);
   };
 
   // Renderizar um estado de carregamento até que o componente seja montado no cliente
   if (!mounted) {
-    return null
+    return (
+      <div className="flex flex-col h-full border-r w-80">
+        <div className="p-4 border-b">
+          <div className="h-9 bg-muted animate-pulse rounded-md"></div>
+        </div>
+        <div className="flex-1">
+          {[1, 2, 3, 4, 5].map((i) => (
+            <div key={`skeleton-${i}`} className="flex items-center gap-3 p-4 animate-pulse">
+              <div className="h-10 w-10 bg-muted rounded-full"></div>
+              <div className="flex-1">
+                <div className="h-4 w-32 bg-muted rounded mb-2"></div>
+                <div className="h-3 w-40 bg-muted rounded"></div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div className="w-80 border-r h-full flex flex-col" suppressHydrationWarning>
-      <div className="p-4">
+    <div className="flex flex-col h-full border-r w-80">
+      <div className="p-4 border-b">
         <div className="relative">
-          <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input 
-            placeholder="Buscar..." 
-            className="pl-8" 
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input
+            type="search"
+            placeholder="Buscar..."
+            className="pl-8"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
       </div>
       
-      <Tabs 
-        defaultValue="conversations" 
-        value={activeTab} 
-        onValueChange={(value) => setActiveTab(value as "conversations" | "users")}
+      <Tabs
+        defaultValue="conversations"
+        value={activeTab}
+        onValueChange={(value) => setActiveTab(value as "groups" | "conversations")}
         className="w-full h-full flex flex-col"
       >
         <TabsList className="w-full justify-start px-4 h-12">
@@ -1327,13 +1087,138 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
             <MessageSquare className="h-4 w-4" />
             <span>Conversas</span>
           </TabsTrigger>
-          <TabsTrigger value="users" className="flex items-center gap-1">
+          <TabsTrigger value="groups" className="flex items-center gap-1">
             <Users className="h-4 w-4" />
-            <span>Usuários</span>
+            <span>Grupos</span>
           </TabsTrigger>
         </TabsList>
         
+        {/* Aba de Conversas (antigas Usuários) */}
         <TabsContent value="conversations" className="mt-0 flex-1 overflow-y-auto">
+          {isLoading ? (
+            <div className="flex flex-col">
+              {/* Skeleton loaders para conversas */}
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={`skeleton-${i}`} className="flex items-center gap-3 p-4 animate-pulse">
+                  <div className="h-10 w-10 bg-muted rounded-full"></div>
+                  <div className="flex-1">
+                    <div className="h-4 w-32 bg-muted rounded mb-2"></div>
+                    <div className="h-3 w-40 bg-muted rounded"></div>
+                  </div>
+                  <div className="h-3 w-12 bg-muted rounded"></div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col">
+              {/* Lista unificada de conversas e contatos */}
+              {filteredDirectConversations.length === 0 && filteredUsers.length === 0 ? (
+                <div className="flex justify-center items-center p-6 text-sm text-muted-foreground">
+                  <p>Nenhuma conversa ou contato encontrado.</p>
+                </div>
+              ) : (
+                <>
+                  {/* Mostrar todas as conversas diretas existentes */}
+                  {filteredDirectConversations.map((conversation) => {
+                    // Para conversas diretas, mostrar o nome do outro participante
+                    let displayName = "";
+                    let displayEmail = "";
+                    let avatarSrc = "";
+                    
+                    // Verificar se profiles existe e é um array
+                    const profiles = conversation.profiles || [];
+                    
+                    const otherParticipants = profiles.filter(
+                      profile => profile && profile.id !== currentUserId
+                    );
+                    
+                    if (otherParticipants.length > 0) {
+                      const otherUser = otherParticipants[0];
+                      displayName = `${otherUser.first_name || ''} ${otherUser.last_name || ''}`.trim() || 'Usuário';
+                      displayEmail = otherUser.email || '';
+                      avatarSrc = otherUser.avatar_url || "/placeholder.svg";
+                    } else {
+                      // Extrair informação do ID da sala se não encontrar participantes
+                      displayName = 'Usuário';
+                      displayEmail = 'Conversa direta';
+                      avatarSrc = "/placeholder.svg";
+                    }
+                    
+                    // Extrair a última mensagem
+                    const lastMessageContent = conversation.lastMessage 
+                      ? conversation.lastMessage.type === "text" 
+                        ? conversation.lastMessage.message_text || conversation.lastMessage.content || "Mensagem"
+                        : "Arquivo enviado" 
+                      : "Nenhuma mensagem";
+                    
+                    return (
+                      <button
+                        key={conversation.id}
+                        className="flex items-center gap-3 p-4 hover:bg-accent text-left w-full"
+                        onClick={() => handleConversationClick(conversation)}
+                      >
+                        <Avatar>
+                          <AvatarImage src={avatarSrc} />
+                          <AvatarFallback>
+                            {displayName[0] || "?"}
+                          </AvatarFallback>
+                        </Avatar>
+                        <div className="flex-1 overflow-hidden">
+                          <div className="font-medium">
+                            {displayName}
+                          </div>
+                          <div className="text-sm text-muted-foreground truncate">
+                            {lastMessageContent}
+                          </div>
+                        </div>
+                        {mounted && conversation.lastMessageTime && <TimeDisplay timestamp={conversation.lastMessageTime} />}
+                      </button>
+                    )
+                  })}
+                  
+                  {/* Mostrar usuários que ainda não têm conversas */}
+                  {filteredUsers
+                    .filter(user => {
+                      // Filtrar usuários que já têm conversas diretas
+                      const hasExistingConversation = filteredDirectConversations.some(conv => {
+                        const profiles = conv.profiles || [];
+                        return profiles.some(profile => profile && profile.id === user.id);
+                      });
+                      return !hasExistingConversation;
+                    })
+                    .map((user) => (
+                      <button
+                        key={user.id}
+                        className="flex items-center gap-3 p-4 hover:bg-accent text-left w-full"
+                        onClick={() => startDirectConversation(user.id)}
+                        disabled={isCreatingConversation}
+                      >
+                        <Avatar>
+                          <AvatarImage src={user.avatar_url || "/placeholder.svg"} />
+                          <AvatarFallback>
+                            {user.first_name?.[0] || ''}
+                            {user.last_name?.[0] || ''}
+                          </AvatarFallback>
+                        </Avatar>
+                        <div className="flex-1 overflow-hidden">
+                          <div className="font-medium">
+                            {user.first_name || ''} {user.last_name || ''}
+                          </div>
+                          <div className="text-sm text-muted-foreground truncate">
+                            {user.email || ''}
+                          </div>
+                        </div>
+                      </button>
+                    ))
+                  }
+                </>
+              )}
+            </div>
+          )}
+        </TabsContent>
+        
+        {/* Aba de Grupos (antigas Conversas) */}
+        <TabsContent value="groups" className="mt-0 flex-1 overflow-y-auto">
           <div className="p-2">
             <Dialog open={isCreatingGroup} onOpenChange={setIsCreatingGroup}>
               <DialogTrigger asChild>
@@ -1423,9 +1308,9 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
           
           {isLoading ? (
             <div className="flex flex-col">
-              {/* Skeleton loaders para conversas */}
-              {[1, 2, 3, 4, 5].map((i) => (
-                <div key={`skeleton-${i}`} className="flex items-center gap-3 p-4 animate-pulse">
+              {/* Skeleton loaders para grupos */}
+              {[1, 2, 3].map((i) => (
+                <div key={`skeleton-group-${i}`} className="flex items-center gap-3 p-4 animate-pulse">
                   <div className="h-10 w-10 bg-muted rounded-full"></div>
                   <div className="flex-1">
                     <div className="h-4 w-32 bg-muted rounded mb-2"></div>
@@ -1437,43 +1322,17 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
             </div>
           ) : (
             <div className="flex flex-col">
-              {filteredConversations.length === 0 ? (
+              {filteredGroupConversations.length === 0 ? (
                 <div className="flex justify-center items-center p-6 text-sm text-muted-foreground">
-                  <p>Ainda não há conversas. Inicie uma conversa com um usuário.</p>
+                  <p>Ainda não há grupos. Crie um novo grupo para começar.</p>
                 </div>
               ) : (
-                filteredConversations.map((conversation) => {
-                  // Para conversas diretas, mostrar o nome do outro participante
-                  let displayName = "";
-                  let displayEmail = "";
-                  let avatarSrc = "";
-                  
-                  if (conversation.type === "direct") {
-                    // Verificar se profiles existe e é um array
-                    const profiles = conversation.profiles || [];
-                    
-                    const otherParticipants = profiles.filter(
-                      profile => profile && profile.id !== currentUserId
-                    );
-                    
-                    if (otherParticipants.length > 0) {
-                      const otherUser = otherParticipants[0];
-                      displayName = `${otherUser.first_name || ''} ${otherUser.last_name || ''}`.trim() || 'Usuário';
-                      displayEmail = otherUser.email || '';
-                      avatarSrc = otherUser.avatar_url || "/placeholder.svg";
-                    } else {
-                      // Extrair informação do ID da sala se não encontrar participantes
-                      displayName = 'Usuário';
-                      displayEmail = 'Conversa direta';
-                      avatarSrc = "/placeholder.svg";
-                    }
-                  } else {
-                    // Para grupos
-                    displayName = conversation.title || 'Grupo';
-                    const profiles = conversation.profiles || [];
-                    displayEmail = `${profiles.length} participantes`;
-                    avatarSrc = conversation.avatar_url || "/placeholder.svg";
-                  }
+                filteredGroupConversations.map((conversation) => {
+                  // Para grupos
+                  const displayName = conversation.title || 'Grupo';
+                  const profiles = conversation.profiles || [];
+                  const displayEmail = `${profiles.length} participantes`;
+                  const avatarSrc = conversation.avatar_url || "/placeholder.svg";
                   
                   // Extrair a última mensagem
                   const lastMessageContent = conversation.lastMessage 
@@ -1485,30 +1344,13 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
                   return (
                     <button
                       key={conversation.id}
-                      className="flex items-center gap-3 p-4 hover:bg-accent text-left"
-                      onClick={() => {
-                        console.log("Clique na conversa com ID:", conversation.id);
-                        console.log("Dados do destinatário:", { 
-                          name: displayName, 
-                          email: displayEmail, 
-                          avatar: avatarSrc 
-                        });
-                        
-                        // Passar diretamente os dados da conversa e o destinatário
-                        const conversationData = {
-                          name: displayName,
-                          email: displayEmail,
-                          avatar: avatarSrc
-                        };
-                        
-                        // Chamar diretamente onSelectConversation com os dados corretos
-                        onSelectConversation(conversation.id, conversationData);
-                      }}
+                      className="flex items-center gap-3 p-4 hover:bg-accent text-left w-full"
+                      onClick={() => handleConversationClick(conversation)}
                     >
                       <Avatar>
                         <AvatarImage src={avatarSrc} />
                         <AvatarFallback>
-                          {displayName[0] || "?"}
+                          {displayName[0] || "G"}
                         </AvatarFallback>
                       </Avatar>
                       <div className="flex-1 overflow-hidden">
@@ -1525,41 +1367,6 @@ export function ConversationList({ onSelectConversation }: ConversationListProps
                 })
               )}
             </div>
-          )}
-        </TabsContent>
-        
-        <TabsContent value="users" className="mt-0 flex-1 overflow-y-auto">
-          {filteredUsers.length === 0 ? (
-            <div className="flex justify-center items-center p-4">
-              <p>Nenhum usuário encontrado</p>
-            </div>
-          ) : (
-          <div className="flex flex-col">
-              {filteredUsers.map((user) => (
-                <button
-                  key={user.id}
-                  className="flex items-center gap-3 p-4 hover:bg-accent text-left"
-                  onClick={() => startDirectConversation(user.id)}
-                  disabled={isCreatingConversation}
-                >
-                <Avatar>
-                    <AvatarImage src={user.avatar_url || "/placeholder.svg"} />
-                    <AvatarFallback>
-                      {user.first_name?.[0] || ''}
-                      {user.last_name?.[0] || ''}
-                    </AvatarFallback>
-                </Avatar>
-                <div className="flex-1 overflow-hidden">
-                    <div className="font-medium">
-                      {user.first_name || ''} {user.last_name || ''}
-                    </div>
-                    <div className="text-sm text-muted-foreground truncate">
-                      {user.email || ''}
-                    </div>
-                </div>
-              </button>
-            ))}
-          </div>
           )}
         </TabsContent>
       </Tabs>

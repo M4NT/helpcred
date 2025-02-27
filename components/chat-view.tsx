@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
-import { Send, Copy, PaperclipIcon } from "lucide-react"
+import { useEffect, useState, useRef, useCallback } from "react"
+import { Send, Paperclip, Mic, X, Pause, Play, Loader2, MoreVertical, Download, Trash, Image as ImageIcon, FileText, File as FileIcon } from "lucide-react"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -14,8 +14,6 @@ import { AudioRecorder } from "@/components/audio-recorder"
 import { FileUpload } from "@/components/file-upload"
 import { fetchMessages, sendMessage, supabase } from "@/lib/supabase"
 import type { Message } from "@/types"
-import { formatDistanceToNow } from "date-fns"
-import { ptBR } from "date-fns/locale"
 import { toast } from "@/components/ui/use-toast"
 
 // Atualização do tipo Message para incluir receiverId
@@ -31,45 +29,48 @@ interface ChatViewProps {
   recipientAvatar?: string
 }
 
-// Componente separado para exibir o tempo da mensagem
-function MessageTime({ timestamp }: { timestamp: string | Date }) {
-  const [formattedTime, setFormattedTime] = useState<string>("")
-  const [mounted, setMounted] = useState(false)
-  
-  useEffect(() => {
-    setMounted(true)
+// Função para formatar o tempo da mensagem
+const formatMessageTime = (timestamp: string): string => {
+  try {
+    const date = new Date(timestamp);
     
-    try {
-      const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp
-      const timeAgo = formatDistanceToNow(date, { locale: ptBR, addSuffix: true })
-      setFormattedTime(timeAgo)
-    } catch (error) {
-      console.error("Erro ao formatar data:", error)
-      setFormattedTime("")
+    // Obter a data atual
+    const now = new Date();
+    
+    // Calcular a diferença em dias
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const messageDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    const diffTime = today.getTime() - messageDate.getTime();
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    
+    // Formatar com base na diferença de dias
+    if (diffDays === 0) {
+      // Hoje - mostrar apenas hora:minuto
+      return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+    } else if (diffDays === 1) {
+      // Ontem
+      return "ontem";
+    } else {
+      // Dias anteriores - mostrar dia da semana abreviado e dia do mês
+      const diasSemana = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+      const diaSemana = diasSemana[date.getDay()];
+      const diaMes = date.getDate();
+      return `${diaSemana}, ${diaMes}`;
     }
-    
-    // Atualizar a formatação a cada minuto
-    const interval = setInterval(() => {
-      try {
-        const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp
-        const timeAgo = formatDistanceToNow(date, { locale: ptBR, addSuffix: true })
-        setFormattedTime(timeAgo)
-      } catch (error) {
-        console.error("Erro ao atualizar formatação de data:", error)
-      }
-    }, 60000)
-    
-    return () => clearInterval(interval)
-  }, [timestamp])
-  
-  if (!mounted) return null;
-  
+  } catch (error) {
+    console.error("Erro ao formatar data:", error);
+    return "";
+  }
+};
+
+// Componente separado para exibir o tempo da mensagem
+const MessageTime = ({ timestamp }: { timestamp: string }) => {
   return (
-    <div className="text-xs text-muted-foreground mt-1 px-1" suppressHydrationWarning>
-      <span suppressHydrationWarning>{formattedTime}</span>
-    </div>
-  )
-}
+    <span className="text-gray-400 text-xs mt-1 ml-1">
+      {formatMessageTime(timestamp)}
+    </span>
+  );
+};
 
 export function ChatView({ 
   chatId, 
@@ -774,19 +775,19 @@ export function ChatView({
       return (
         <>
           {[1, 2, 3].map((i) => (
-            <div key={`skeleton-${i}`} className="flex gap-3 mb-4 animate-pulse">
-              <div className="h-8 w-8 bg-muted rounded-full"></div>
+            <div key={`skeleton-${i}`} className="flex gap-3 mb-6 animate-pulse">
+              <div className="h-10 w-10 bg-muted rounded-full"></div>
               <div className="flex flex-col max-w-[80%]">
-                <div className="bg-muted rounded-lg p-3 w-48 h-12"></div>
-                <div className="h-3 w-20 bg-muted mt-1 rounded"></div>
+                <div className="bg-muted rounded-lg p-4 w-56 h-14"></div>
+                <div className="h-3 w-20 bg-muted mt-2 rounded"></div>
               </div>
             </div>
           ))}
           {[1, 2].map((i) => (
-            <div key={`skeleton-agent-${i}`} className="flex gap-3 justify-end mb-4 animate-pulse">
+            <div key={`skeleton-agent-${i}`} className="flex gap-3 justify-end mb-6 animate-pulse">
               <div className="flex flex-col max-w-[80%]">
-                <div className="bg-muted rounded-lg p-3 w-40 h-10"></div>
-                <div className="h-3 w-20 bg-muted mt-1 rounded ml-auto"></div>
+                <div className="bg-muted rounded-lg p-4 w-48 h-12"></div>
+                <div className="h-3 w-20 bg-muted mt-2 rounded ml-auto"></div>
               </div>
             </div>
           ))}
@@ -836,18 +837,18 @@ export function ChatView({
         {messages.map((message) => (
           <div 
             key={`${chatId}-${message.id}`} 
-            className={`flex gap-3 ${message.sender === "agent" ? "justify-end" : ""}`}
+            className={`flex gap-3 mb-5 ${message.sender === "agent" ? "justify-end" : ""}`}
             suppressHydrationWarning
           >
             {message.sender !== "agent" && (
-              <Avatar className="h-8 w-8">
+              <Avatar className="h-10 w-10">
                 <AvatarImage src={localRecipientAvatar || recipientAvatar || "/placeholder.svg"} />
                 <AvatarFallback>{localRecipientName ? localRecipientName[0] : recipientName ? recipientName[0] : "?"}</AvatarFallback>
               </Avatar>
             )}
             <div className="flex flex-col max-w-[80%]">
               <div
-                className={`rounded-lg p-3 ${
+                className={`rounded-lg p-4 ${
                   message.sender === "agent" ? "bg-primary text-primary-foreground" : "bg-accent"
                 }`}
               >
@@ -863,7 +864,7 @@ export function ChatView({
                     tabIndex={0}
                     aria-label={`Baixar arquivo ${message.fileName}`}
                   >
-                    <PaperclipIcon className="h-4 w-4" />
+                    <Paperclip className="h-4 w-4" />
                     <span suppressHydrationWarning>{message.fileName}</span>
                     <span className="text-xs opacity-70" suppressHydrationWarning>
                       ({Math.round((message.fileSize || 0) / 1024)}KB)
@@ -874,7 +875,7 @@ export function ChatView({
                   <audio controls src={message.content} className="max-w-full" suppressHydrationWarning />
                 )}
               </div>
-              {typeof window !== 'undefined' && mounted && <MessageTime timestamp={message.timestamp} />}
+              <MessageTime timestamp={message.timestamp} />
             </div>
           </div>
         ))}
@@ -936,25 +937,6 @@ export function ChatView({
             <div className="font-semibold text-lg">{localRecipientName || recipientName || "Usuário"}</div>
             <div className="text-sm text-muted-foreground flex items-center gap-2">
               <span>{localRecipientEmail || recipientEmail || "Sem email"}</span>
-              {(localRecipientEmail || recipientEmail) && (
-                <Copy 
-                  className="h-4 w-4 cursor-pointer hover:text-primary transition-colors" 
-                  onClick={() => {
-                    navigator.clipboard.writeText(localRecipientEmail || recipientEmail || "");
-                    toast({
-                      title: "Email copiado",
-                      description: "O email foi copiado para a área de transferência.",
-                    });
-                  }}
-                  aria-label="Copiar email"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      navigator.clipboard.writeText(localRecipientEmail || recipientEmail || "")
-                    }
-                  }}
-                />
-              )}
             </div>
           </div>
         </div>
